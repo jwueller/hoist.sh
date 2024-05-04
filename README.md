@@ -1,6 +1,6 @@
 # `hoist.sh`
 
-**Move files and directories up by `n` levels.**
+**Move files up the directory tree.**
 
 ## Requirements
 

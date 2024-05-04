@@ -29,7 +29,7 @@ HOIST_VERSION="0.1.2"
 
 hoist_version() {
   printf "%s" "\
-hoist $HOIST_VERSION - move files up by one directory
+hoist $HOIST_VERSION - move files up the directory tree
 Copyright 2024 Johannes Wüller <johanneswueller@gmail.com>
 https://github.com/jwueller/hoist.sh
 "
