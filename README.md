@@ -11,7 +11,7 @@
 To use `hoist`, just download the [latest release](https://github.com/jwueller/hoist.sh/releases/latest) to where you want it, then make it executable:
 
 ```sh
-sudo curl -o /usr/local/bin/hoist https://github.com/jwueller/hoist.sh/releases/latest/download/hoist
+sudo curl -Lo /usr/local/bin/hoist https://github.com/jwueller/hoist.sh/releases/latest/download/hoist
 sudo chmod +x /usr/local/bin/hoist
 ```
 
