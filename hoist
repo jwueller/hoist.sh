@@ -1,0 +1,336 @@
+#!/usr/bin/env sh
+
+# Copyright 2024 Johannes Wüller <johanneswueller@gmail.com>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; If not, see <http://www.gnu.org/licenses/>.
+
+HOIST_VERSION="0.1.2"
+
+# This is mostly based on the Google Shell Style Guide.
+# See: https://google.github.io/styleguide/shellguide.html
+#
+# Deviations to make up for POSIX `sh` limitations, since the style guide is
+# geared towards `bash`:
+#
+# - Functions are prefixed with `hoist_` to avoid name clashes.
+# - Variables with "local" semantics are prefixed with `_`, to avoid most name
+#   clashes and to show intent.
+
+hoist_version() {
+  printf "%s" "\
+hoist $HOIST_VERSION - move files up by one directory
+Copyright 2024 Johannes Wüller <johanneswueller@gmail.com>
+https://github.com/jwueller/hoist.sh
+"
+}
+
+hoist_help() {
+  hoist_version
+  printf "%s" "\
+
+Usage:
+  $(basename -- "$0") [options] [--] <path>...
+
+  If <path> refers to a file, it is hoisted by the specified number of
+  directories. If <path> refers to a directory, its contents are hoisted by the
+  specified number of directories, and the original directory is removed, if
+  successfully emptied. If multiple paths are passed, they are processed
+  sequentially.
+
+Options:
+  -h, --help             Show this help message and exit.
+  --version              Show version information and exit.
+  -v, --verbose          Print executed commands.
+  -f, --force            Do not prompt before overwriting.
+  -i, --interactive      Prompt before overwriting.
+  -n <n>, --count <n>    Number of directories to hoist by; defaults to 1. If
+                         <n> is 0, no files are moved. If <n> is greater than
+                         the number of directories available, the files will
+                         end up in the highest available.
+  --dry-run              Print commands without executing them. Also activates
+                         by setting the DRY_RUN environment variable.
+
+This is free software; you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+"
+}
+
+# Unfortunately, POSIX `sh` does not provide a native way to escape strings for
+# use in shell commands. We at least try to do the right thing here for verbose
+# and dry-run output.
+hoist_escape_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      # Exclude empty string from the following wildcards.
+      '')
+        printf "''"
+        ;;
+
+      # Contains unsafe characters, so quote it.
+      *[!A-Za-z0-9/.,_-]*)
+        printf "'"
+        printf "%s" "$1" | sed "s/'/'\\\\''/g"
+        printf "'"
+        ;;
+
+      # We can only get here if only safe characters were present.
+      *)
+        printf "%s" "$1"
+        ;;
+    esac
+
+    shift
+    if [ "$#" -gt 0 ]; then
+      printf ' '
+    fi
+  done
+}
+
+hoist() {
+  _help=
+  _version=
+  _verbose=
+  _force=
+  _interactive=
+
+  # Note: It's intentional that dry run can't be turned off once it's on, so it
+  # is guaranteed to never modify the system if it was reqeusted at any point.
+  _dry_run="$DRY_RUN"
+
+  _count=1
+  _configure_count() {
+    case "$1" in
+      '' | *[!0-9]*)
+        echo "hoist: invalid count: $1" >&2
+        return 64 # EX_USAGE
+        ;;
+
+      *)
+        _count="$1"
+        ;;
+    esac
+  }
+
+  # If this variable is empty, we are parsing at the top level. Otherwise, we
+  # are parsing an argument that requires a specific value.
+  _next_arg_type=
+  for _arg in "$@"; do
+    shift
+
+    if [ -z "$_next_arg_type" ]; then
+      case "$_arg" in
+        -h | --help | -\?)
+          _help=1
+          ;;
+
+        --version)
+          _version=1
+          ;;
+
+        -v | --verbose)
+          _verbose=1
+          ;;
+
+        -f | --force)
+          _force=1
+          ;;
+
+        -i | --interactive)
+          _interactive=1
+          ;;
+
+        -n | --count)
+          _next_arg_type=count
+          ;;
+
+        -n*) # shorter short option shorthand (heh)
+          _configure_count "${_arg#-n}" || return
+          ;;
+
+        --dry-run)
+          _dry_run=1
+          ;;
+
+        --)
+          _next_arg_type=positional
+          ;;
+
+        -*)
+          echo "hoist: unknown option: $_arg" >&2
+          return 64 # EX_USAGE
+          ;;
+
+        *)
+          # Assume positional; keep it.
+          set -- "$@" "$_arg"
+          ;;
+      esac
+    else
+      case "$_next_arg_type" in
+        count)
+          _configure_count "$_arg" || return
+          _next_arg_type=
+          ;;
+
+        positional)
+          set -- "$@" "$_arg" # keep
+          # Note: This does intentionally not reset the argument type, since we
+          # only accept posititonal arguments from now on.
+          ;;
+
+        *)
+          echo "hoist: internal error: unexpected argument type: $_next_arg_type" >&2
+          return 70 # EX_SOFTWARE
+          ;;
+      esac
+    fi
+  done
+
+  if [ -n "$_version" ]; then
+    hoist_version
+    return 0
+  fi
+
+  if [ -n "$_help" ]; then
+    hoist_help
+    return 0
+  fi
+
+  # We can only continue if we have sources, because path concatenation might
+  # otherwise lead to unexpected results, like moving `/` around.
+  if [ "$#" -eq 0 ]; then
+    # Nothing to do!
+
+    # If positional arguments are explicit, this is likely an expected case, so
+    # we just exit normally.
+    if [ "$_next_arg_type" = "positional" ]; then
+      return 0
+    fi
+
+    hoist_help >&2
+    return 64 # EX_USAGE
+  fi
+
+  # Wrapper to deal with verbosity and dry-run in a uniform way.
+  _exec() {
+    if [ -n "$_verbose" ] || [ -n "$_dry_run" ]; then
+      printf "+ "
+      hoist_escape_args "$@"
+      printf "\n"
+    fi >&2
+
+    if [ -z "$_dry_run" ]; then
+      "$@"
+    fi
+  }
+
+  # Let's go!
+  _failure_count=0
+  for _src in "$@"; do
+    if [ -d "$_src" ]; then
+      # Make path absolute.
+      _src="$(CDPATH= cd -- "$_src" && pwd)"
+
+      # Figure out the destination.
+      _dst="$_src"
+      _remaining_count="$_count"
+      while [ "$_remaining_count" -gt 0 ]; do
+        _dst="$(dirname -- "$_dst")"
+        _remaining_count="$((_remaining_count - 1))"
+      done
+
+      if [ "$_dst" = "$_src" ]; then
+        if [ -n "$_verbose" ]; then
+          echo "hoist: source and destination are identical; nothing to do: $_src" >&2
+        fi
+
+        continue
+      fi
+
+      if [ -n "$_verbose" ]; then
+        echo "hoist: moving $_src to $_dst" >&2
+      fi
+
+      # Rename the source to something less likely to collide, so this works as
+      # expected when moving to the same directory: `hoist ./bar/bar` => `./bar`
+      _tmp="$(dirname -- "$_src")/.hoist_$$_$(date +%Y%m%d%H%M%S)_$(awk 'BEGIN { srand(); print substr(sprintf("%f", rand()), 3) }')"
+
+      # If this fails, we probably don't have permission or it doesn't exist at
+      # all.
+      _exec mv -- "$_src" "$_tmp" || return
+
+      # Do as many moves as we can, then figure out if we got everything later
+      # when we try to `rmdir`.
+      for _src_item in "$_tmp"/* "$_tmp"/.*; do
+        # `nullglob` isn't a thing in POSIX, so we have to make sure the files
+        # actually exist if any of them come back looking like a glob.
+        if [ "$_src_item" = "$_tmp/*" ] || [ "$_src_item" = "$_tmp/.*" ]; then
+          if [ ! -e "$_src_item" ]; then
+            continue
+          fi
+        fi
+
+        if ! _exec mv ${_interactive:+'-i'} ${_force:+'-f'} -- "$_src_item" "$_dst"; then
+          _failure_count="$((_failure_count + 1))"
+        fi
+      done
+
+      # If rmdir fails, we didn't manage to move everything. At least attempt to
+      # restore the original name so the user can deal with it.
+      _exec rmdir -- "$_tmp" \
+        || _exec mv -- "$_tmp" "$_src" \
+        || true
+    elif [ -e "$_src" ]; then
+      # Source is not a directory, so we can't move out of it. Instead, we just
+      # move up the individual file.
+
+      # Make path absolute.
+      _src="$(CDPATH= cd -- "$(dirname -- "$_src")" && pwd)/$(basename -- "$_src")"
+
+      # Figure out the desination directory.
+      _src_parent="$(dirname -- "$_src")"
+      _dst_parent="$_src_parent"
+      _remaining_count="$_count"
+      while [ "$_remaining_count" -gt 0 ]; do
+        _dst_parent="$(dirname -- "$_dst_parent")"
+        _remaining_count="$((_remaining_count - 1))"
+      done
+
+      if [ "$_dst_parent" = "$_src_parent" ]; then
+        if [ -n "$_verbose" ]; then
+          echo "hoist: source and destination are identical; nothing to do: $_src_parent" >&2
+        fi
+
+        continue
+      fi
+
+      if ! _exec mv ${_interactive:+'-i'} ${_force:+'-f'} -- "$_src" "$_dst_parent"; then
+        _failure_count="$((_failure_count + 1))"
+      fi
+    else
+      _failure_count="$((_failure_count + 1))"
+      echo "hoist: no such file or directory: $_src" >&2
+    fi
+  done
+
+  # If we failed to move anything, we should return an error.
+  if [ "$_failure_count" -ne 0 ]; then
+    echo "hoist: $_failure_count operations failed; see above" >&2
+    return 66 # EX_NOINPUT
+  fi
+}
+
+if [ -z "$__SOURCED__" ]; then
+  hoist "$@"
+fi
